@@ -1,0 +1,178 @@
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Syne:wght@700;800&display=swap');
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #0f0f0f;
+  color: #e8e8e8;
+  font-family: 'JetBrains Mono', monospace;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+h1 {
+  font-family: 'Syne', sans-serif;
+  font-size: 1.6rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: #f0f0f0;
+  margin-bottom: 4px;
+}
+
+.subtitle {
+  font-size: 0.72rem;
+  color: #555;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin-bottom: 20px;
+}
+
+/* ── Layout ── */
+.main-layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+/* ── Canvas wrapper ── */
+.canvas-wrapper {
+  position: relative;
+  display: inline-block;
+  border: 1px solid #2a2a2a;
+  border-radius: 6px;
+  overflow: hidden;
+  cursor: crosshair;
+  flex-shrink: 0;
+}
+
+#base-image {
+  display: block;
+  max-width: 640px;
+  width: 100%;
+  height: auto;
+  user-select: none;
+  pointer-events: none;
+}
+
+#grid-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  cursor: crosshair;
+}
+
+/* ── Side panel ── */
+.side-panel {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel-card {
+  background: #161616;
+  border: 1px solid #252525;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.panel-label {
+  font-size: 0.62rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: #444;
+  margin-bottom: 10px;
+}
+
+/* ── Buttons ── */
+.btn-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn-shiny {
+  background: #1e1e1e;
+  color: #ccc;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 7px 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  white-space: nowrap;
+}
+.btn-shiny:hover          { background: #2a2a2a; border-color: #555; color: #fff; }
+.btn-shiny.danger         { border-color: #6b2626; color: #e07070; }
+.btn-shiny.danger:hover   { background: #2a1010; border-color: #e07070; }
+.btn-shiny.accent         { border-color: #2e5c3e; color: #6dcea0; }
+.btn-shiny.accent:hover   { background: #101f16; border-color: #6dcea0; }
+
+/* ── Slider ── */
+.shiny-input-container                       { width: 100% !important; }
+.irs--shiny .irs-bar                         { background: #6dcea0; border-top: 1px solid #6dcea0; border-bottom: 1px solid #6dcea0; }
+.irs--shiny .irs-handle                      { border: 2px solid #6dcea0; }
+.irs--shiny .irs-single                      { background: #6dcea0; color: #0f0f0f; font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
+.irs--shiny .irs-min, .irs--shiny .irs-max  { color: #444; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; }
+.irs--shiny .irs-line                        { background: #252525; }
+
+/* ── Tile list ── */
+#tile-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+#tile-list::-webkit-scrollbar       { width: 4px; }
+#tile-list::-webkit-scrollbar-track { background: #0f0f0f; }
+#tile-list::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+.tile-badge {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: #1a2620;
+  border: 1px solid #2e5c3e;
+  border-radius: 3px;
+  padding: 5px 10px;
+  font-size: 0.68rem;
+  color: #6dcea0;
+  animation: fadeIn 0.15s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.tile-badge span {
+  color: #335544;
+  font-size: 0.6rem;
+}
+
+.empty-state {
+  color: #333;
+  font-size: 0.68rem;
+  text-align: center;
+  padding: 20px 0;
+  letter-spacing: 0.05em;
+}
+
+/* ── Count chip ── */
+.count-chip {
+  display: inline-block;
+  background: #6dcea0;
+  color: #0a1a10;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.65rem;
+  font-weight: 700;
+  border-radius: 3px;
+  padding: 1px 7px;
+  margin-left: 8px;
+}

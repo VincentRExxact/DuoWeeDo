@@ -66,24 +66,18 @@ hit_tile <- function(px, py) {
 #  DRAWING  (base R graphics)
 # ══════════════════════════════════════════════════════════════════════════════
 
-draw_grid <- function(img_path, selected) {
+draw_grid <- function(raster_img, selected) {
   
-  ext <- tolower(file_ext(img_path))
-  img <- switch(ext,
-                png  = png::readPNG(img_path),
-                jpg  = ,
-                jpeg = jpeg::readJPEG(img_path),
-                stop("Unsupported format: ", ext)
-  )
+  co <- trap_corners()
   
   par(mar = c(0, 0, 0, 0))
   plot.new()
   plot.window(xlim = c(0, 1), ylim = c(0, 1))
-  rasterImage(img, 0, 0, 1, 1, interpolate = TRUE)
   
-  co <- trap_corners()
+  # Draw the cached raster — no disk I/O here
+  rasterImage(raster_img, 0, 0, 1, 1, interpolate = TRUE)
   
-  # Selected fills
+  # Selected tile fills
   for (tile in selected) {
     pts <- tile_corners(tile$row - 1L, tile$col - 1L)
     polygon(
@@ -111,6 +105,7 @@ draw_grid <- function(img_path, selected) {
     lines(xs, ys, col = "#50c882", lwd = 1.4)
   }
 }
+  
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IMAGE LOADER
@@ -123,12 +118,27 @@ load_random_image <- function(img_dir = "images") {
   sample(files, 1)
 }
 
+
+load_random_raster <- function(img_dir = "images") {
+  files <- list.files(img_dir, full.names = TRUE)
+  files <- files[tolower(file_ext(files)) %in% c("jpg", "jpeg", "png")]
+  if (length(files) == 0) return(NULL)
+  path <- sample(files, 1)
+  ext  <- tolower(file_ext(path))
+  switch(ext,
+         png  = png::readPNG(path),
+         jpg  = ,
+         jpeg = jpeg::readJPEG(path)
+  )
+}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  UI  — image + grid only, no navbar, no toolbar, no sliders
 # ══════════════════════════════════════════════════════════════════════════════
 
 ui <- f7Page(
-  title   = "Tile Selector",
+  title   = "DuoWeeDo",
   allowPWA = FALSE,
   options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
   
@@ -146,7 +156,7 @@ ui <- f7Page(
 
 server <- function(input, output, session) {
   
-  current_img <- reactiveVal(load_random_image())
+   cached_raster <- reactiveVal(load_random_raster())
   sel_tiles   <- reactiveVal(list())
   
   # Click → hit-test in R → toggle tile
@@ -165,14 +175,19 @@ server <- function(input, output, session) {
   
   # Render image + overlaid grid
   output$grid_plot <- renderPlot({
-    path <- current_img()
-    if (is.null(path)) {
+    raster <- cached_raster()
+    if (is.null(raster)) {
       plot.new()
-      text(0.5, 0.5, "Put images in the images/ folder", cex = 1.4, col = "grey60")
+      text(0.5, 0.5, "Put images in images/ folder", cex = 1.4, col = "grey60")
       return()
     }
-    draw_grid(path, sel_tiles())
-  })
+    # Only sel_tiles() changes on click — raster is already in memory
+    draw_grid(raster, sel_tiles())
+  },
+  bg            = "black",
+  res           = 96,
+  execOnResize  = FALSE    # FIX 3 — no re-render on window resize = no extra blanks
+  )
 }
 
 shinyApp(ui, server)

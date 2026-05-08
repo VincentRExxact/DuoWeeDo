@@ -184,7 +184,6 @@ server <- function(input, output, session) {
     # Only sel_tiles() changes on click — raster is already in memory
     draw_grid(raster, sel_tiles())
   },
-  bg            = "black",
   res           = 96,
   execOnResize  = FALSE    # FIX 3 — no re-render on window resize = no extra blanks
   )

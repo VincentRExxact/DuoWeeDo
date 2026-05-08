@@ -129,7 +129,7 @@ load_random_image <- function(img_dir = "images") {
 
 ui <- f7Page(
   title   = "Tile Selector",
-  allowPWA = TRUE,
+  allowPWA = FALSE,
   options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
   
   plotOutput(

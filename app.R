@@ -1,176 +1,178 @@
 library(shiny)
-library(jsonlite)
+library(shinyMobile)
+library(png)
+library(jpeg)
 library(tools)
 
-# ── UI ────────────────────────────────────────────────────────────────────────
-ui <- fluidPage(
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONSTANTS
+# ══════════════════════════════════════════════════════════════════════════════
 
-  # External CSS and JS (served from www/)
-  tags$head(
-    tags$link(rel = "stylesheet", href = "styles.css"),
-    tags$script(src = "grid.js")
-  ),
+G           <- 8L      # grid size — 8×8, hard-coded
+TOP_MARGIN  <- 0.22    # perspective: fraction inset on each side at the top
 
-  h1("DuoWeeDo"),
-  div(class = "subtitle", "CLick the weed tiles"),
+# ══════════════════════════════════════════════════════════════════════════════
+#  GEOMETRY  (pure R)
+# ══════════════════════════════════════════════════════════════════════════════
 
-  div(class = "main-layout",
-
-    # ── Canvas zone ──────────────────────────────────────────────────────────
-    div(class = "canvas-wrapper",
-      tags$img(id = "base-image", src = NULL, alt = ""),
-      tags$canvas(id = "grid-canvas")
-    ),
-
-    # ── Side panel ───────────────────────────────────────────────────────────
-    div(class = "side-panel",
-
-      div(class = "panel-card",
-        div(class = "panel-label", "Controls"),
-        div(class = "btn-row",
-          actionButton("new_image", "\u21bb New Image", class = "btn-shiny"),
-          actionButton("clear_sel", "\u2715 Clear",     class = "btn-shiny danger")
-        ),
-        br(),
-        div(class = "panel-label", "Grid size"),
-        sliderInput("grid_size", label = NULL,
-          min = 2, max = 16, value = 8, step = 1, ticks = FALSE),
-        div(class = "panel-label", "Perspective"),
-        sliderInput("perspective", label = NULL,
-          min = 0, max = 45, value = 22, step = 1, ticks = FALSE)
-      ),
-
-      div(class = "panel-card",
-        div(class = "panel-label",
-          "Selected Tiles",
-          tags$span(id = "sel-count", class = "count-chip", "0")
-        ),
-        div(id = "tile-list",
-          div(class = "empty-state", "No tiles selected yet")
-        )
-      ),
-
-      div(class = "panel-card",
-        div(class = "panel-label", "Export"),
-        div(class = "btn-row",
-          downloadButton("dl_csv", "CSV", class = "btn-shiny accent"),
-          downloadButton("dl_txt", "TXT", class = "btn-shiny accent")
-        )
-      )
-    )
-  )
-)
-
-# ── Server ────────────────────────────────────────────────────────────────────
-server <- function(input, output, session) {
-
-  img_dir   <- "images"
-  img_ext   <- c("jpg", "jpeg", "png", "gif", "bmp", "webp")
-  sel_tiles <- reactiveVal(list())
-
-  # ── Helper: pick a random image and copy it to www/ for serving ────────────
-  load_random_image <- function() {
-    if (!dir.exists(img_dir)) {
-      showNotification("\u26a0 'images/' folder not found.", type = "error")
-      return(NULL)
-    }
-    files <- list.files(img_dir, full.names = TRUE)
-    files <- files[file_ext(files) %in% img_ext]
-    if (length(files) == 0) {
-      showNotification("\u26a0 No images found in images/ folder.", type = "error")
-      return(NULL)
-    }
-    chosen  <- sample(files, 1)
-    www_dir <- file.path("www", "current_image")
-    dir.create(www_dir, showWarnings = FALSE, recursive = TRUE)
-    dest    <- file.path(www_dir, basename(chosen))
-    file.copy(chosen, dest, overwrite = TRUE)
-    paste0("current_image/", basename(chosen))
-  }
-
-  # ── On startup: load first image ───────────────────────────────────────────
-  observe({
-    src <- load_random_image()
-    if (!is.null(src)) {
-      session$sendCustomMessage("load_image", list(
-        src         = src,
-        grid        = isolate(input$grid_size)   %||% 8,
-        perspective = isolate(input$perspective) %||% 22
-      ))
-    }
-  })
-
-  # ── New image button ───────────────────────────────────────────────────────
-  observeEvent(input$new_image, {
-    sel_tiles(list())
-    src <- load_random_image()
-    if (!is.null(src)) {
-      session$sendCustomMessage("load_image", list(
-        src         = src,
-        grid        = input$grid_size,
-        perspective = input$perspective
-      ))
-    }
-  })
-
-  # ── Grid size or perspective change → redraw ───────────────────────────────
-  observeEvent(list(input$grid_size, input$perspective), {
-    session$sendCustomMessage("redraw_grid", list(
-      grid        = input$grid_size,
-      perspective = input$perspective
-    ))
-  }, ignoreInit = TRUE)
-
-  # ── Clear selection ────────────────────────────────────────────────────────
-  observeEvent(input$clear_sel, {
-    sel_tiles(list())
-    session$sendCustomMessage("clear_tiles", list())
-  })
-
-  # ── Sync JS selection to R ─────────────────────────────────────────────────
-  observeEvent(input$selected_tiles, {
-    parsed <- tryCatch(
-      fromJSON(input$selected_tiles),
-      error = function(e) list()
-    )
-    sel_tiles(parsed)
-  })
-
-  # ── Helper: build a clean data.frame from selection ────────────────────────
-  make_df <- function() {
-    tiles <- sel_tiles()
-    if (length(tiles) == 0 ||
-        (is.data.frame(tiles) && nrow(tiles) == 0))
-      return(data.frame(row = integer(), col = integer()))
-
-    if (is.data.frame(tiles)) {
-      data.frame(row = tiles$row + 1L, col = tiles$col + 1L)
-    } else {
-      data.frame(
-        row = sapply(tiles, `[[`, "row") + 1L,
-        col = sapply(tiles, `[[`, "col") + 1L
-      )
-    }
-  }
-
-  # ── Downloads ──────────────────────────────────────────────────────────────
-  output$dl_csv <- downloadHandler(
-    filename = function() paste0("tiles_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv"),
-    content  = function(file) write.csv(make_df(), file, row.names = FALSE)
-  )
-
-  output$dl_txt <- downloadHandler(
-    filename = function() paste0("tiles_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".txt"),
-    content  = function(file) {
-      df    <- make_df()
-      lines <- if (nrow(df) == 0) "No tiles selected." else
-                 apply(df, 1, function(r) paste0("[", r["row"], ",", r["col"], "]"))
-      writeLines(lines, file)
-    }
+bilerp <- function(tl, tr, bl, br, u, v) {
+  list(
+    x = (1-u)*(1-v)*tl$x + u*(1-v)*tr$x + (1-u)*v*bl$x + u*v*br$x,
+    y = (1-u)*(1-v)*tl$y + u*(1-v)*tr$y + (1-u)*v*bl$y + u*v*br$y
   )
 }
 
-# ── Null-coalescing operator ───────────────────────────────────────────────────
-`%||%` <- function(a, b) if (!is.null(a)) a else b
+trap_corners <- function() {
+  list(
+    tl = list(x = TOP_MARGIN,     y = 1),
+    tr = list(x = 1 - TOP_MARGIN, y = 1),
+    bl = list(x = 0,              y = 0),
+    br = list(x = 1,              y = 0)
+  )
+}
+
+tile_corners <- function(r, c) {
+  co <- trap_corners()
+  u0 <- c / G;       u1 <- (c + 1) / G
+  vt <- (G - r) / G; vb <- (G - 1 - r) / G
+  list(
+    tl = bilerp(co$tl, co$tr, co$bl, co$br, u0, vt),
+    tr = bilerp(co$tl, co$tr, co$bl, co$br, u1, vt),
+    br = bilerp(co$tl, co$tr, co$bl, co$br, u1, vb),
+    bl = bilerp(co$tl, co$tr, co$bl, co$br, u0, vb)
+  )
+}
+
+point_in_quad <- function(px, py, corners) {
+  pts <- list(corners$tl, corners$tr, corners$br, corners$bl)
+  for (i in 1:4) {
+    a     <- pts[[i]]
+    b     <- pts[[(i %% 4) + 1]]
+    cross <- (b$x - a$x) * (py - a$y) - (b$y - a$y) * (px - a$x)
+    if (cross < 0) return(FALSE)
+  }
+  TRUE
+}
+
+hit_tile <- function(px, py) {
+  for (r in 0:(G-1))
+    for (c in 0:(G-1))
+      if (point_in_quad(px, py, tile_corners(r, c)))
+        return(list(row = r + 1L, col = c + 1L))
+  NULL
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DRAWING  (base R graphics)
+# ══════════════════════════════════════════════════════════════════════════════
+
+draw_grid <- function(img_path, selected) {
+  
+  ext <- tolower(file_ext(img_path))
+  img <- switch(ext,
+                png  = png::readPNG(img_path),
+                jpg  = ,
+                jpeg = jpeg::readJPEG(img_path),
+                stop("Unsupported format: ", ext)
+  )
+  
+  par(mar = c(0, 0, 0, 0))
+  plot.new()
+  plot.window(xlim = c(0, 1), ylim = c(0, 1))
+  rasterImage(img, 0, 0, 1, 1, interpolate = TRUE)
+  
+  co <- trap_corners()
+  
+  # Selected fills
+  for (tile in selected) {
+    pts <- tile_corners(tile$row - 1L, tile$col - 1L)
+    polygon(
+      c(pts$tl$x, pts$tr$x, pts$br$x, pts$bl$x),
+      c(pts$tl$y, pts$tr$y, pts$br$y, pts$bl$y),
+      col    = adjustcolor("#6dcea0", alpha.f = 0.35),
+      border = "#6dcea0",
+      lwd    = 2
+    )
+  }
+  
+  # Horizontal grid lines
+  for (ri in 0:G) {
+    v  <- ri / G
+    xs <- sapply(0:G, function(ci) bilerp(co$tl, co$tr, co$bl, co$br, ci/G, v)$x)
+    ys <- sapply(0:G, function(ci) bilerp(co$tl, co$tr, co$bl, co$br, ci/G, v)$y)
+    lines(xs, ys, col = "#50c882", lwd = 1.4)
+  }
+  
+  # Vertical grid lines
+  for (ci in 0:G) {
+    u  <- ci / G
+    xs <- sapply(0:G, function(ri) bilerp(co$tl, co$tr, co$bl, co$br, u, ri/G)$x)
+    ys <- sapply(0:G, function(ri) bilerp(co$tl, co$tr, co$bl, co$br, u, ri/G)$y)
+    lines(xs, ys, col = "#50c882", lwd = 1.4)
+  }
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  IMAGE LOADER
+# ══════════════════════════════════════════════════════════════════════════════
+
+load_random_image <- function(img_dir = "images") {
+  files <- list.files(img_dir, full.names = TRUE)
+  files <- files[tolower(file_ext(files)) %in% c("jpg", "jpeg", "png")]
+  if (length(files) == 0) return(NULL)
+  sample(files, 1)
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  UI  — image + grid only, no navbar, no toolbar, no sliders
+# ══════════════════════════════════════════════════════════════════════════════
+
+ui <- f7Page(
+  title   = "Tile Selector",
+  allowPWA = TRUE,
+  options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
+  
+  plotOutput(
+    outputId = "grid_plot",
+    click    = clickOpts(id = "plot_click", clip = TRUE),
+    width    = "100%",
+    height   = "100%"   
+  )
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SERVER
+# ══════════════════════════════════════════════════════════════════════════════
+
+server <- function(input, output, session) {
+  
+  current_img <- reactiveVal(load_random_image())
+  sel_tiles   <- reactiveVal(list())
+  
+  # Click → hit-test in R → toggle tile
+  observeEvent(input$plot_click, {
+    click <- input$plot_click
+    if (is.null(click)) return()
+    if (click$x < 0 || click$x > 1 || click$y < 0 || click$y > 1) return()
+    
+    hit <- hit_tile(click$x, click$y)
+    if (is.null(hit)) return()
+    
+    tiles   <- sel_tiles()
+    already <- vapply(tiles, function(t) t$row == hit$row && t$col == hit$col, logical(1))
+    sel_tiles(if (any(already)) tiles[!already] else c(tiles, list(hit)))
+  })
+  
+  # Render image + overlaid grid
+  output$grid_plot <- renderPlot({
+    path <- current_img()
+    if (is.null(path)) {
+      plot.new()
+      text(0.5, 0.5, "Put images in the images/ folder", cex = 1.4, col = "grey60")
+      return()
+    }
+    draw_grid(path, sel_tiles())
+  })
+}
 
 shinyApp(ui, server)

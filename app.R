@@ -111,13 +111,6 @@ draw_grid <- function(raster_img, selected) {
 #  IMAGE LOADER
 # ══════════════════════════════════════════════════════════════════════════════
 
-load_random_image <- function(img_dir = "images") {
-  files <- list.files(img_dir, full.names = TRUE)
-  files <- files[tolower(file_ext(files)) %in% c("jpg", "jpeg", "png")]
-  if (length(files) == 0) return(NULL)
-  sample(files, 1)
-}
-
 
 load_random_raster <- function(img_dir = "images") {
   files <- list.files(img_dir, full.names = TRUE)
@@ -132,9 +125,10 @@ load_random_raster <- function(img_dir = "images") {
   )
 }
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  UI  — image + grid only, no navbar, no toolbar, no sliders
+#  UI
+#  www/swipe.js is auto-served by Shiny from the www/ folder.
+#  It fires 'swipe_left' and 'swipe_right' Shiny inputs — nothing else.
 # ══════════════════════════════════════════════════════════════════════════════
 
 ui <- f7Page(
@@ -142,11 +136,23 @@ ui <- f7Page(
   allowPWA = FALSE,
   options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
   
-  plotOutput(
-    outputId = "grid_plot",
-    click    = clickOpts(id = "plot_click", clip = TRUE),
-    width    = "100%",
-    height   = "100%"   
+  tags$head(
+    tags$script(src = "swipe.js")   # loaded from www/swipe.js
+  ),
+  
+f7SingleLayout(
+    navbar = f7Navbar(
+      title = "DuoWeeDo"
+    ),
+    
+    # main content
+    f7Card(
+      title = "Green On Brown",
+      plotOutput(
+        outputId = "grid_plot",
+        click    = clickOpts(id = "plot_click", clip = TRUE)
+      )
+    )
   )
 )
 
@@ -156,8 +162,24 @@ ui <- f7Page(
 
 server <- function(input, output, session) {
   
-   cached_raster <- reactiveVal(load_random_raster())
+  cached_raster <- reactiveVal(load_random_raster())
   sel_tiles   <- reactiveVal(list())
+  
+  
+  # ── Swipe left → new random image + clear selection ────────────────────────
+  observeEvent(input$swipe_left, {
+    new_raster <- load_random_raster()
+    if (!is.null(new_raster)) {
+      cached_raster(new_raster)
+      sel_tiles(list())
+    }
+  })
+  
+  # ── Swipe right → clear selection only ────────────────────────────────────
+  observeEvent(input$swipe_right, {
+    sel_tiles(list())
+  })
+  
   
   # Click → hit-test in R → toggle tile
   observeEvent(input$plot_click, {

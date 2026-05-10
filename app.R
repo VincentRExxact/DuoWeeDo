@@ -19,11 +19,7 @@ logDB<-function(){
 Connection_db<-logDB()
 
 
-session_token<-ifelse(exists("session"),session$token,"test_token")
 
-Temp<-tibble(date= Sys.time(),session=session_token)
-
-Connection_db$insert(Temp)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -186,6 +182,13 @@ server <- function(input, output, session) {
   
   cached_raster <- reactiveVal(load_random_raster())
   sel_tiles   <- reactiveVal(list())
+  
+# Log sur Mongo DB  
+  session_token<-ifelse(exists("session"),session$token,"test_token")
+  Temp<-tibble(date= Sys.time(),session=session_token)
+  print(session_token)
+  Connection_db$insert(Temp)
+  
   
   
   # ── Swipe left → new random image + clear selection ────────────────────────

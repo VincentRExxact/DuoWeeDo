@@ -3,6 +3,28 @@ library(shinyMobile)
 library(png)
 library(jpeg)
 library(tools)
+library(mongolite)
+library(tidyverse)
+
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  CONNECT TO MONGODB
+# ══════════════════════════════════════════════════════════════════════════════
+logDB<-function(){
+  Connection = mongo(collection="Connection", db="DuoWeeDo", url=Sys.getenv("MONGO_URL"))
+  return(Connection)
+}
+
+Connection_db<-logDB()
+
+
+session_token<-ifelse(exists("session"),session$token,"test_token")
+
+Temp<-tibble(date= Sys.time(),session=session_token)
+
+Connection_db$insert(Temp)
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  CONSTANTS

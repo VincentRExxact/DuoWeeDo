@@ -1350,16 +1350,22 @@
   },
   "files": {
     ".Rprofile": {
-      "checksum": "64cfe3b1f2d67229dd2c8e17149c4465"
+      "checksum": "6aea635096bc0ee78042bb96a779925c"
     },
     "app.R": {
-      "checksum": "103794fe4c0ae716ecc55b9c47a8a7ea"
+      "checksum": "e40a965b80ecc7fd4b952f70700f756c"
     },
     "images/image1.png": {
       "checksum": "5d5fdd963793519c17afae19c1466908"
     },
+    "images/Image2.jpg": {
+      "checksum": "8fe37775a39226f0b4a51733ed278997"
+    },
     "README.md": {
-      "checksum": "c10b3a0252c4e62ed6731570bf7e0543"
+      "checksum": "b02b093bb511f4dff7e917193ff79a23"
+    },
+    "www/swipe.js": {
+      "checksum": "648b7212b239384bac86b0a458d6054c"
     }
   },
   "users": null

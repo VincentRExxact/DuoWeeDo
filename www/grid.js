@@ -188,7 +188,7 @@ function drawGrid() {
   }
 
   /* 4 — Bordures des tuiles sélectionnées */
-  ctx.strokeStyle = '#6dcea0';
+  ctx.strokeStyle = '#FFcea0';    /*'#6dcea0';*/
   ctx.lineWidth   = 2.5;
   Object.keys(selectedTiles).forEach(function(key2) {
     var rc2 = key2.split(',');

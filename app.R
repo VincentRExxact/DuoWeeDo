@@ -1,174 +1,70 @@
 library(shiny)
 library(shinyMobile)
-library(png)
-library(jpeg)
 library(tools)
-library(mongolite)
-library(tidyverse)
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  CONNECT TO MONGODB
-# ══════════════════════════════════════════════════════════════════════════════
-logDB<-function(){
-  Connection = mongo(collection="Connection", db="DuoWeeDo", url=Sys.getenv("MONGO_URL"))
-  return(Connection)
-}
-
-Connection_db<-logDB()
-
-
-
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  CONSTANTS
-# ══════════════════════════════════════════════════════════════════════════════
-
-G           <- 8L      # grid size — 8×8, hard-coded
-TOP_MARGIN  <- 0.22    # perspective: fraction inset on each side at the top
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  GEOMETRY  (pure R)
-# ══════════════════════════════════════════════════════════════════════════════
-
-bilerp <- function(tl, tr, bl, br, u, v) {
-  list(
-    x = (1-u)*(1-v)*tl$x + u*(1-v)*tr$x + (1-u)*v*bl$x + u*v*br$x,
-    y = (1-u)*(1-v)*tl$y + u*(1-v)*tr$y + (1-u)*v*bl$y + u*v*br$y
-  )
-}
-
-trap_corners <- function() {
-  list(
-    tl = list(x = TOP_MARGIN,     y = 1),
-    tr = list(x = 1 - TOP_MARGIN, y = 1),
-    bl = list(x = 0,              y = 0),
-    br = list(x = 1,              y = 0)
-  )
-}
-
-tile_corners <- function(r, c) {
-  co <- trap_corners()
-  u0 <- c / G;       u1 <- (c + 1) / G
-  vt <- (G - r) / G; vb <- (G - 1 - r) / G
-  list(
-    tl = bilerp(co$tl, co$tr, co$bl, co$br, u0, vt),
-    tr = bilerp(co$tl, co$tr, co$bl, co$br, u1, vt),
-    br = bilerp(co$tl, co$tr, co$bl, co$br, u1, vb),
-    bl = bilerp(co$tl, co$tr, co$bl, co$br, u0, vb)
-  )
-}
-
-point_in_quad <- function(px, py, corners) {
-  pts <- list(corners$tl, corners$tr, corners$br, corners$bl)
-  for (i in 1:4) {
-    a     <- pts[[i]]
-    b     <- pts[[(i %% 4) + 1]]
-    cross <- (b$x - a$x) * (py - a$y) - (b$y - a$y) * (px - a$x)
-    if (cross < 0) return(FALSE)
-  }
-  TRUE
-}
-
-hit_tile <- function(px, py) {
-  for (r in 0:(G-1))
-    for (c in 0:(G-1))
-      if (point_in_quad(px, py, tile_corners(r, c)))
-        return(list(row = r + 1L, col = c + 1L))
-  NULL
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  DRAWING  (base R graphics)
-# ══════════════════════════════════════════════════════════════════════════════
-
-draw_grid <- function(raster_img, selected) {
-  
-  co <- trap_corners()
-  
-  par(mar = c(0, 0, 0, 0))
-  plot.new()
-  plot.window(xlim = c(0, 1), ylim = c(0, 1))
-  
-  # Draw the cached raster — no disk I/O here
-  rasterImage(raster_img, 0, 0, 1, 1, interpolate = TRUE)
-  
-  # Selected tile fills
-  for (tile in selected) {
-    pts <- tile_corners(tile$row - 1L, tile$col - 1L)
-    polygon(
-      c(pts$tl$x, pts$tr$x, pts$br$x, pts$bl$x),
-      c(pts$tl$y, pts$tr$y, pts$br$y, pts$bl$y),
-      col    = adjustcolor("#6dcea0", alpha.f = 0.35),
-      border = "#6dcea0",
-      lwd    = 2
-    )
-  }
-  
-  # Horizontal grid lines
-  for (ri in 0:G) {
-    v  <- ri / G
-    xs <- sapply(0:G, function(ci) bilerp(co$tl, co$tr, co$bl, co$br, ci/G, v)$x)
-    ys <- sapply(0:G, function(ci) bilerp(co$tl, co$tr, co$bl, co$br, ci/G, v)$y)
-    lines(xs, ys, col = "#50c882", lwd = 1.4)
-  }
-  
-  # Vertical grid lines
-  for (ci in 0:G) {
-    u  <- ci / G
-    xs <- sapply(0:G, function(ri) bilerp(co$tl, co$tr, co$bl, co$br, u, ri/G)$x)
-    ys <- sapply(0:G, function(ri) bilerp(co$tl, co$tr, co$bl, co$br, u, ri/G)$y)
-    lines(xs, ys, col = "#50c882", lwd = 1.4)
-  }
-}
-  
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IMAGE LOADER
+#  Copies ALL images from images/ into www/current/ once at startup so Shiny
+#  can serve them as static assets. Returns a list of relative URLs.
 # ══════════════════════════════════════════════════════════════════════════════
 
-
-load_random_raster <- function(img_dir = "images") {
+prepare_images <- function(img_dir = "images") {
   files <- list.files(img_dir, full.names = TRUE)
   files <- files[tolower(file_ext(files)) %in% c("jpg", "jpeg", "png")]
   if (length(files) == 0) return(NULL)
-  path <- sample(files, 1)
-  ext  <- tolower(file_ext(path))
-  switch(ext,
-         png  = png::readPNG(path),
-         jpg  = ,
-         jpeg = jpeg::readJPEG(path)
-  )
+
+  out_dir <- file.path("www", "current")
+  dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
+
+  urls <- vapply(files, function(f) {
+    dest <- file.path(out_dir, basename(f))
+    file.copy(f, dest, overwrite = TRUE)
+    paste0("current/", basename(f))
+  }, character(1))
+
+  unname(urls)
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UI
-#  www/swipe.js is auto-served by Shiny from the www/ folder.
-#  It fires 'swipe_left' and 'swipe_right' Shiny inputs — nothing else.
+#  Minimal: just a button to open the PhotoBrowser.
+#  The canvas is injected as a fixed overlay by JS (events.js) — it sits on
+#  top of the PhotoBrowser's full-screen view at z-index 9999.
 # ══════════════════════════════════════════════════════════════════════════════
 
 ui <- f7Page(
-  title   = "DuoWeeDo",
-  allowPWA = FALSE,
-  options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
-  
+  title   = "Tile Selector",
+  options = list(theme = "auto", dark = "auto", color = "#6dcea0"),
+
   tags$head(
-    tags$script(src = "swipe.js")   # loaded from www/swipe.js
+    tags$style(HTML("
+      /* Fixed canvas overlay — positioned above the PhotoBrowser (z-index ~13000) */
+      #grid-canvas {
+        position: fixed;
+        top: 0; left: 0;
+        width: 100vw; height: 100svh;
+        z-index: 13500;
+        pointer-events: none;   /* start disabled; events.js enables on open */
+        touch-action: none;
+        display: none;          /* hidden until PhotoBrowser opens */
+      }
+    ")),
+    tags$script(src = "www/grid.js"),
+    tags$script(src = "www/events.js")
   ),
-  
-f7SingleLayout(
-    navbar = f7Navbar(
-      title = "DuoWeeDo"
-    ),
-    
-    # main content
-    f7Card(
-      title = "Green On Brown",
-      plotOutput(
-        outputId = "grid_plot",
-        click    = clickOpts(id = "plot_click", clip = TRUE)
+
+  # Canvas lives at document root — outside the PhotoBrowser DOM — so it
+  # reliably overlays regardless of Framework7's internal z-index stack.
+  tags$canvas(id = "grid-canvas"),
+
+  f7SingleLayout(
+    navbar = f7Navbar(title = "Tile Selector"),
+
+    f7Block(
+      f7Button(
+        inputId = "open_browser",
+        label   = "Open images",
+        color   = "teal"
       )
     )
   )
@@ -179,61 +75,77 @@ f7SingleLayout(
 # ══════════════════════════════════════════════════════════════════════════════
 
 server <- function(input, output, session) {
-  
-  cached_raster <- reactiveVal(load_random_raster())
-  sel_tiles   <- reactiveVal(list())
-  
-# Log sur Mongo DB  
-  session_token<-ifelse(exists("session"),session$token,"test_token")
-  Temp<-tibble(date= Sys.time(),session=session_token)
-  print(session_token)
-  Connection_db$insert(Temp)
-  
-  
-  
-  # ── Swipe left → new random image + clear selection ────────────────────────
-  observeEvent(input$swipe_left, {
-    new_raster <- load_random_raster()
-    if (!is.null(new_raster)) {
-      cached_raster(new_raster)
-      sel_tiles(list())
+
+  # Prepare all images once at startup
+  all_urls   <- prepare_images()
+  sel_tiles  <- reactiveVal(list())
+  # Track which image is currently displayed (index into all_urls)
+  current_idx <- reactiveVal(1L)
+
+  if (is.null(all_urls)) {
+    f7Toast(session, text = "No images found in images/ folder.", position = "bottom")
+  }
+
+  # ── Build photos list for f7PhotoBrowser ────────────────────────────────────
+  # NOTE: f7PhotoBrowser requires at least 2 photos (known shinyMobile bug).
+  # If only 1 image exists, we duplicate it to satisfy this constraint.
+  make_photos <- function(urls) {
+    if (length(urls) == 1) urls <- c(urls, urls)
+    lapply(urls, function(u) list(url = u))
+  }
+
+  # ── Open PhotoBrowser when button is clicked ────────────────────────────────
+  observeEvent(input$open_browser, {
+    req(all_urls)
+    f7PhotoBrowser(
+      id     = "photo_browser",
+      theme  = "dark",
+      type   = "standalone",    # full-screen, no back button chrome
+      photos = make_photos(all_urls)
+    )
+    # Tell JS to show and size the canvas overlay
+    session$sendCustomMessage("browser_opened", list(
+      urls = all_urls,
+      idx  = current_idx() - 1L   # 0-based for JS
+    ))
+  })
+
+  # ── PhotoBrowser swipe → new image index reported by JS ────────────────────
+  # events.js fires 'photo_index_changed' with the new 0-based index
+  observeEvent(input$photo_index_changed, {
+    new_idx <- as.integer(input$photo_index_changed) + 1L
+    current_idx(new_idx)
+    sel_tiles(list())   # clear selection on image change
+  })
+
+  # ── PhotoBrowser closed → hide canvas ──────────────────────────────────────
+  observeEvent(input$browser_closed, {
+    session$sendCustomMessage("browser_closed", list())
+  })
+
+  # ── Tile selection from JS ──────────────────────────────────────────────────
+  observeEvent(input$selected_tiles, {
+    tiles <- input$selected_tiles
+    if (is.null(tiles)) return()
+
+    result <- if (is.data.frame(tiles)) {
+      lapply(seq_len(nrow(tiles)), function(i)
+        list(row = tiles$row[i], col = tiles$col[i]))
+    } else {
+      tiles
     }
+    sel_tiles(result)
+
+    # ── Persistence hook ─────────────────────────────────────────────────────
+    # Uncomment when ready:
+    # df <- data.frame(
+    #   timestamp  = Sys.time(),
+    #   image_name = basename(all_urls[current_idx()]),
+    #   row        = sapply(result, `[[`, "row"),
+    #   col        = sapply(result, `[[`, "col")
+    # )
+    # mongolite::mongo("tiles", url = Sys.getenv("MONGO_URL"))$insert(df)
   })
-  
-  # ── Swipe right → clear selection only ────────────────────────────────────
-  observeEvent(input$swipe_right, {
-    sel_tiles(list())
-  })
-  
-  
-  # Click → hit-test in R → toggle tile
-  observeEvent(input$plot_click, {
-    click <- input$plot_click
-    if (is.null(click)) return()
-    if (click$x < 0 || click$x > 1 || click$y < 0 || click$y > 1) return()
-    
-    hit <- hit_tile(click$x, click$y)
-    if (is.null(hit)) return()
-    
-    tiles   <- sel_tiles()
-    already <- vapply(tiles, function(t) t$row == hit$row && t$col == hit$col, logical(1))
-    sel_tiles(if (any(already)) tiles[!already] else c(tiles, list(hit)))
-  })
-  
-  # Render image + overlaid grid
-  output$grid_plot <- renderPlot({
-    raster <- cached_raster()
-    if (is.null(raster)) {
-      plot.new()
-      text(0.5, 0.5, "Put images in images/ folder", cex = 1.4, col = "grey60")
-      return()
-    }
-    # Only sel_tiles() changes on click — raster is already in memory
-    draw_grid(raster, sel_tiles())
-  },
-  res           = 96,
-  execOnResize  = FALSE    # FIX 3 — no re-render on window resize = no extra blanks
-  )
 }
 
 shinyApp(ui, server)

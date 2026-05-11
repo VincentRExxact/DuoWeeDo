@@ -1,189 +1,159 @@
 /* ─────────────────────────────────────────────────────────────────────────────
-   events.js  —  PhotoBrowser lifecycle + tile tap interaction
-   Depends on: grid.js  (selectedTiles, hitTile, drawGrid, notifyShiny)
+   events.js  —  PhotoBrowser lifecycle + tile tap
+   Depends on: grid.js
 
-   Responsibilities:
-     1. Show/hide the canvas overlay when PhotoBrowser opens/closes
-     2. Detect PhotoBrowser's internal slide change → notify R of new image index
-     3. Detect PhotoBrowser close → notify R
-     4. Handle tap on canvas → toggle tile (grid.js hit-test)
-
-   NOT needed here (PhotoBrowser owns it natively):
-     • Swipe left/right between images — Framework7 handles this
-     • Image loading — PhotoBrowser loads images from the urls R provided
+   Key design:
+     • Canvas is injected INSIDE the active slide img's container.
+     • This means it overlays only the photo area — not the whole app.
+     • Shiny buttons outside the PhotoBrowser remain fully accessible.
+     • On slide change: canvas moves to the new active slide.
+     • On close: canvas is removed from DOM entirely.
 ───────────────────────────────────────────────────────────────────────────── */
 
-/* ── State ───────────────────────────────────────────────────────────────── */
-var browserIsOpen = false;
-var f7PhotoBrowserInstance = null;
+var browserIsOpen  = false;
+var TAP_MAX_TRAVEL = 10;   /* px — above this it's a swipe, not a tap */
+var tapStartX = null, tapStartY = null;
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   R → JS: PhotoBrowser has been opened by the server
-   msg: { urls: [...], idx: 0-based current index }
+   R → JS: PhotoBrowser just opened
+   We poll for the active slide img — it may take a few frames to appear.
 ───────────────────────────────────────────────────────────────────────────── */
-Shiny.addCustomMessageHandler('browser_opened', function(msg) {
-  selectedTiles = {};
-
-  /* Wait one tick for Framework7 to finish mounting the PhotoBrowser DOM */
-  setTimeout(function() {
-    attachPhotoBrowserHooks();
-    showCanvas();
-  }, 300);
+Shiny.addCustomMessageHandler('browser_opened', function(_msg) {
+  selectedTiles  = {};
+  browserIsOpen  = true;
+  waitForSlideAndAttach();
 });
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   R → JS: PhotoBrowser has been closed
-───────────────────────────────────────────────────────────────────────────── */
-Shiny.addCustomMessageHandler('browser_closed', function(_msg) {
-  hideCanvas();
-});
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   FRAMEWORK7 PHOTOBROWSER HOOKS
-   Framework7 exposes its instances on window.f7.photoBrowser.
-   We hook into the swiper inside the PhotoBrowser to detect slide changes,
-   and into the PhotoBrowser's close event to notify R.
-───────────────────────────────────────────────────────────────────────────── */
-function attachPhotoBrowserHooks() {
-  /* Framework7 v6+: active instances are accessible via the app object */
-  var app = window.app || (window.f7 && window.f7.app);
-  if (!app) return;
-
-  /* Find the most recently opened PhotoBrowser instance */
-  var pb = app.photoBrowser && app.photoBrowser.instance;
-  if (!pb) {
-    /* Fallback: try grabbing it from the DOM swiper instance */
-    var swiperEl = document.querySelector('.photo-browser-swiper-container .swiper');
-    if (swiperEl && swiperEl.swiper) {
-      hookSwiper(swiperEl.swiper);
+/* Poll until the active slide img is rendered, then attach canvas. */
+function waitForSlideAndAttach() {
+  var attempts = 0;
+  var timer = setInterval(function() {
+    attempts++;
+    var ok = attachCanvasToSlide();
+    if (ok) {
+      clearInterval(timer);
+      drawGrid();
+      hookPhotoBrowserEvents();
     }
-    return;
+    if (attempts > 40) clearInterval(timer);  /* give up after ~2 s */
+  }, 50);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   HOOK INTO FRAMEWORK7 PHOTOBROWSER EVENTS
+   We listen directly on the DOM for Framework7's custom events, which are
+   more reliable than trying to access the app instance programmatically.
+───────────────────────────────────────────────────────────────────────────── */
+function hookPhotoBrowserEvents() {
+  /* The PhotoBrowser popup/standalone element */
+  var pbEl = document.querySelector('.photo-browser');
+  if (!pbEl) return;
+
+  /* Slide changed — move canvas to new active slide */
+  pbEl.addEventListener('slidechange', onSlideChange);
+  pbEl.addEventListener('swiperslidechange', onSlideChange);
+
+  /* Also hook the inner swiper element directly */
+  var swiperEl = pbEl.querySelector('.swiper');
+  if (swiperEl && swiperEl.swiper) {
+    swiperEl.swiper.on('slideChange', onSlideChange);
   }
 
-  f7PhotoBrowserInstance = pb;
-  browserIsOpen = true;
+  /* PhotoBrowser closed */
+  pbEl.addEventListener('popup:close',     onBrowserClose);
+  pbEl.addEventListener('photobrowser:close', onBrowserClose);
 
-  /* Slide change → clear selection + tell R new index */
-  if (pb.swiper) hookSwiper(pb.swiper);
-
-  /* PhotoBrowser close */
-  pb.on('close', function() {
-    browserIsOpen = false;
-    hideCanvas();
-    Shiny.setInputValue('browser_closed', Date.now(), { priority: 'event' });
+  /* Fallback: watch for PhotoBrowser disappearing from DOM */
+  var observer = new MutationObserver(function(mutations) {
+    mutations.forEach(function(m) {
+      m.removedNodes.forEach(function(n) {
+        if (n === pbEl || (n.querySelector && n.querySelector('.photo-browser'))) {
+          onBrowserClose();
+          observer.disconnect();
+        }
+      });
+    });
   });
+  observer.observe(document.body, { childList: true, subtree: true });
 }
 
-function hookSwiper(swiper) {
-  swiper.on('slideChange', function() {
-    selectedTiles = {};
-    drawGrid();
-    notifyShiny();
-    Shiny.setInputValue(
-      'photo_index_changed',
-      swiper.activeIndex,
-      { priority: 'event' }
-    );
-  });
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   CANVAS OVERLAY  show / hide / size
-───────────────────────────────────────────────────────────────────────────── */
-function showCanvas() {
-  var canvas = document.getElementById('grid-canvas');
-  if (!canvas) return;
-
-  canvas.style.display = 'block';
-  canvas.style.pointerEvents = 'auto';   /* enable touch events */
-  browserIsOpen = true;
-
-  sizeCanvas();
-  drawGrid();
-}
-
-function hideCanvas() {
-  var canvas = document.getElementById('grid-canvas');
-  if (!canvas) return;
-
-  canvas.style.display = 'none';
-  canvas.style.pointerEvents = 'none';
-  browserIsOpen = false;
-
-  /* Clear state */
+function onSlideChange() {
   selectedTiles = {};
-  var ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  /* Small delay so Framework7 finishes moving the active slide class */
+  setTimeout(function() {
+    var ok = attachCanvasToSlide();
+    if (ok) {
+      drawGrid();
+      notifyShiny();
+
+      /* Report new index to R */
+      var swiper = getSwiperInstance();
+      if (swiper) {
+        Shiny.setInputValue('photo_index_changed', swiper.activeIndex, { priority: 'event' });
+      }
+    }
+  }, 80);
 }
 
-function sizeCanvas() {
-  var canvas = document.getElementById('grid-canvas');
-  if (!canvas) return;
-  canvas.width  = window.innerWidth;
-  canvas.height = window.innerHeight;
+function onBrowserClose() {
+  browserIsOpen = false;
+  removeCanvas();
+  Shiny.setInputValue('browser_closed', Date.now(), { priority: 'event' });
 }
 
-window.addEventListener('resize', function() {
-  if (browserIsOpen) { sizeCanvas(); drawGrid(); }
-});
+function getSwiperInstance() {
+  var swiperEl = document.querySelector('.photo-browser .swiper, .photo-browser-swiper');
+  return (swiperEl && swiperEl.swiper) ? swiperEl.swiper : null;
+}
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TAP → TILE TOGGLE
-   The canvas sits above the PhotoBrowser; we capture taps here and pass
-   pixel coords to hitTile() from grid.js.
-   We do NOT consume the event (no preventDefault) so Framework7 can still
-   handle its own tap gestures (double-tap to zoom etc.) underneath.
+   Coordinates are relative to the canvas element (already positioned over img).
 ───────────────────────────────────────────────────────────────────────────── */
 
-/* Desktop click */
+/* Desktop click — only on the canvas itself */
 document.addEventListener('click', function(e) {
-  if (!browserIsOpen) return;
-  var canvas = document.getElementById('grid-canvas');
-  if (!canvas || e.target !== canvas) return;
-  toggleTile(e.clientX, e.clientY);
+  if (!browserIsOpen || !_canvas) return;
+  if (e.target !== _canvas) return;
+  var rect = _canvas.getBoundingClientRect();
+  toggleTile(e.clientX - rect.left, e.clientY - rect.top);
 });
 
-/* Mobile tap — distinguish from swipe by checking touch travel distance */
-var tapStartX = null, tapStartY = null;
-var TAP_MAX_TRAVEL = 10;   /* px — anything larger is a swipe, not a tap */
-
+/* Mobile: touchstart records start position */
 document.addEventListener('touchstart', function(e) {
   if (!browserIsOpen) return;
   tapStartX = e.touches[0].clientX;
   tapStartY = e.touches[0].clientY;
 }, { passive: true });
 
+/* Mobile: touchend — if travel small enough, treat as tap on canvas */
 document.addEventListener('touchend', function(e) {
   if (!browserIsOpen || tapStartX === null) return;
-
   var touch = e.changedTouches[0];
   var dx = touch.clientX - tapStartX;
   var dy = touch.clientY - tapStartY;
   tapStartX = tapStartY = null;
 
-  /* Only treat as a tap if finger barely moved */
-  if (Math.sqrt(dx*dx + dy*dy) > TAP_MAX_TRAVEL) return;
+  if (Math.sqrt(dx*dx + dy*dy) > TAP_MAX_TRAVEL) return;  /* was a swipe */
+  if (!_canvas) return;
 
-  var canvas = document.getElementById('grid-canvas');
-  if (!canvas) return;
+  /* Only act if touch landed on the canvas */
+  var rect = _canvas.getBoundingClientRect();
+  var px   = touch.clientX - rect.left;
+  var py   = touch.clientY - rect.top;
+  if (px < 0 || py < 0 || px > rect.width || py > rect.height) return;
 
-  toggleTile(touch.clientX, touch.clientY);
+  toggleTile(px, py);
 }, { passive: true });
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   TOGGLE TILE  (shared by click and tap)
+   TOGGLE TILE
 ───────────────────────────────────────────────────────────────────────────── */
 function toggleTile(px, py) {
   var hit = hitTile(px, py);
   if (!hit) return;
-
   var key = hit.row + ',' + hit.col;
-  if (selectedTiles[key]) {
-    delete selectedTiles[key];
-  } else {
-    selectedTiles[key] = true;
-  }
-
+  selectedTiles[key] ? delete selectedTiles[key] : (selectedTiles[key] = true);
   drawGrid();
   notifyShiny();
 }

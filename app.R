@@ -4,8 +4,7 @@ library(tools)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IMAGE LOADER
-#  Copies ALL images from images/ into www/current/ once at startup so Shiny
-#  can serve them as static assets. Returns a list of relative URLs.
+#  Copies all images from images/ into www/current/ at startup.
 # ══════════════════════════════════════════════════════════════════════════════
 
 prepare_images <- function(img_dir = "images") {
@@ -16,46 +15,26 @@ prepare_images <- function(img_dir = "images") {
   out_dir <- file.path("www", "current")
   dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 
-  urls <- vapply(files, function(f) {
-    dest <- file.path(out_dir, basename(f))
-    file.copy(f, dest, overwrite = TRUE)
+  unname(vapply(files, function(f) {
+    file.copy(f, file.path(out_dir, basename(f)), overwrite = TRUE)
     paste0("current/", basename(f))
-  }, character(1))
-
-  unname(urls)
+  }, character(1)))
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UI
-#  Minimal: just a button to open the PhotoBrowser.
-#  The canvas is injected as a fixed overlay by JS (events.js) — it sits on
-#  top of the PhotoBrowser's full-screen view at z-index 9999.
+#  No canvas in the page — JS injects it inside the PhotoBrowser slide.
+#  No CSS overrides needed either.
 # ══════════════════════════════════════════════════════════════════════════════
 
 ui <- f7Page(
   title   = "Tile Selector",
-  options = list(theme = "auto", dark = "auto", color = "#6dcea0"),
+  options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
 
   tags$head(
-    tags$style(HTML("
-      /* Fixed canvas overlay — positioned above the PhotoBrowser (z-index ~13000) */
-      #grid-canvas {
-        position: fixed;
-        top: 0; left: 0;
-        width: 100vw; height: 100svh;
-        z-index: 13500;
-        pointer-events: none;   /* start disabled; events.js enables on open */
-        touch-action: none;
-        display: none;          /* hidden until PhotoBrowser opens */
-      }
-    ")),
-    tags$script(src = "www/grid.js"),
-    tags$script(src = "www/events.js")
+    tags$script(src = "grid.js"),
+    tags$script(src = "events.js")
   ),
-
-  # Canvas lives at document root — outside the PhotoBrowser DOM — so it
-  # reliably overlays regardless of Framework7's internal z-index stack.
-  tags$canvas(id = "grid-canvas"),
 
   f7SingleLayout(
     navbar = f7Navbar(title = "Tile Selector"),
@@ -76,51 +55,41 @@ ui <- f7Page(
 
 server <- function(input, output, session) {
 
-  # Prepare all images once at startup
-  all_urls   <- prepare_images()
-  sel_tiles  <- reactiveVal(list())
-  # Track which image is currently displayed (index into all_urls)
-  current_idx <- reactiveVal(1L)
+  all_urls      <- prepare_images()
+  sel_tiles     <- reactiveVal(list())
+  current_idx   <- reactiveVal(1L)
 
-  if (is.null(all_urls)) {
+  if (is.null(all_urls))
     f7Toast(session, text = "No images found in images/ folder.", position = "bottom")
-  }
 
-  # ── Build photos list for f7PhotoBrowser ────────────────────────────────────
-  # NOTE: f7PhotoBrowser requires at least 2 photos (known shinyMobile bug).
-  # If only 1 image exists, we duplicate it to satisfy this constraint.
+  # f7PhotoBrowser requires >= 2 photos (known shinyMobile constraint)
   make_photos <- function(urls) {
     if (length(urls) == 1) urls <- c(urls, urls)
     lapply(urls, function(u) list(url = u))
   }
 
-  # ── Open PhotoBrowser when button is clicked ────────────────────────────────
+  # ── Open PhotoBrowser, then tell JS it's open ──────────────────────────────
   observeEvent(input$open_browser, {
     req(all_urls)
     f7PhotoBrowser(
       id     = "photo_browser",
-      theme  = "dark",
-      type   = "standalone",    # full-screen, no back button chrome
+      theme  = "light",
+      type   = "standalone",
       photos = make_photos(all_urls)
     )
-    # Tell JS to show and size the canvas overlay
-    session$sendCustomMessage("browser_opened", list(
-      urls = all_urls,
-      idx  = current_idx() - 1L   # 0-based for JS
-    ))
+    # Notify JS — it will poll for the active slide img and inject the canvas
+    session$sendCustomMessage("browser_opened", list())
   })
 
-  # ── PhotoBrowser swipe → new image index reported by JS ────────────────────
-  # events.js fires 'photo_index_changed' with the new 0-based index
+  # ── Slide change reported by JS ────────────────────────────────────────────
   observeEvent(input$photo_index_changed, {
-    new_idx <- as.integer(input$photo_index_changed) + 1L
-    current_idx(new_idx)
-    sel_tiles(list())   # clear selection on image change
+    current_idx(as.integer(input$photo_index_changed) + 1L)
+    sel_tiles(list())
   })
 
-  # ── PhotoBrowser closed → hide canvas ──────────────────────────────────────
+  # ── PhotoBrowser closed ────────────────────────────────────────────────────
   observeEvent(input$browser_closed, {
-    session$sendCustomMessage("browser_closed", list())
+    sel_tiles(list())
   })
 
   # ── Tile selection from JS ──────────────────────────────────────────────────
@@ -136,8 +105,7 @@ server <- function(input, output, session) {
     }
     sel_tiles(result)
 
-    # ── Persistence hook ─────────────────────────────────────────────────────
-    # Uncomment when ready:
+    # ── Persistence hook ──────────────────────────────────────────────────────
     # df <- data.frame(
     #   timestamp  = Sys.time(),
     #   image_name = basename(all_urls[current_idx()]),

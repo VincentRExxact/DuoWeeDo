@@ -4,36 +4,37 @@
    Depends on: grid.js  (gridAttach, gridDraw, gridRemove, gridClear,
                           gridHitTile, selectedTiles)
 
-   Responsibilities:
-     • Listen to Shiny messages from R (browser_opened, clear_tiles)
-     • Detect PhotoBrowser slide changes and close
-     • Detect tap on canvas → toggle tile → notify Shiny
-     • Send events back to R via Shiny.setInputValue:
-         photo_index_changed  → new slide index (0-based)
-         browser_closed       → PhotoBrowser was dismissed
-         selected_tiles       → current tile selection (1-based row/col)
+   Mobile tap fix (two parts):
+     1. _lastSlideIndex guard — Swiper fires slideChange even on tap snap-back
+        (finger lifts without actually changing slide). We compare the new
+        index to the last known one and ignore if equal.
+     2. Canvas-direct touch listeners with capture:true — we attach touchstart
+        and touchend directly on the canvas element (not document) so we
+        intercept before Swiper's own handlers consume the event.
 
-   NO geometry here. NO drawing here. NO DOM canvas management here.
+   Shiny inputs fired:
+     selected_tiles       → current tile selection (1-based row/col)
+     photo_index_changed  → new slide index (0-based) on real swipe
+     browser_closed       → PhotoBrowser dismissed
 ───────────────────────────────────────────────────────────────────────────── */
 
-var _browserIsOpen = false;
-var _tapStartX     = null;
-var _tapStartY     = null;
-var TAP_MAX_TRAVEL = 10;   /* px — above this it's a swipe, not a tap */
+var _browserIsOpen  = false;
+var _tapStartX      = null;
+var _tapStartY      = null;
+var _lastSlideIndex = -1;   /* guard: only reset tiles on a real slide change */
+var TAP_MAX_TRAVEL  = 10;   /* px — finger travel above which we treat as swipe */
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SHINY → JS  (inbound messages from R)
+   SHINY → JS
 ───────────────────────────────────────────────────────────────────────────── */
 
-/* R signals that the PhotoBrowser has been opened.
-   Poll until the active slide img is painted, then attach and draw.         */
 Shiny.addCustomMessageHandler('browser_opened', function(_msg) {
-  _browserIsOpen = true;
-  selectedTiles  = {};
+  _browserIsOpen  = true;
+  _lastSlideIndex = 0;
+  selectedTiles   = {};
   _pollUntilReady();
 });
 
-/* R asks to clear the tile selection.                                       */
 Shiny.addCustomMessageHandler('clear_tiles', function(_msg) {
   gridClear();
   _notifyTiles();
@@ -43,8 +44,8 @@ Shiny.addCustomMessageHandler('clear_tiles', function(_msg) {
    PHOTOBROWSER LIFECYCLE
 ───────────────────────────────────────────────────────────────────────────── */
 
-/* Poll every 50 ms until gridAttach() succeeds (img is rendered),
-   then draw the grid and hook PhotoBrowser DOM events.                      */
+/* Poll every 50 ms until the active slide img is rendered.
+   Then draw the grid, attach canvas touch listeners, hook F7 events.        */
 function _pollUntilReady() {
   var attempts = 0;
   var timer = setInterval(function() {
@@ -52,27 +53,27 @@ function _pollUntilReady() {
     if (gridAttach()) {
       clearInterval(timer);
       gridDraw();
+      _attachCanvasTouchListeners();
       _hookPhotoBrowserEvents();
     }
     if (attempts > 40) clearInterval(timer);   /* give up after ~2 s */
   }, 50);
 }
 
-/* Hook slide-change and close events on the PhotoBrowser DOM element.       */
 function _hookPhotoBrowserEvents() {
   var pbEl = document.querySelector('.photo-browser');
   if (!pbEl) return;
 
-  /* Slide changed: delegate to swiper instance for reliability */
+  /* Hook Swiper slideChange for real slide navigation                       */
   var swiperEl = pbEl.querySelector('.swiper');
   if (swiperEl && swiperEl.swiper) {
     swiperEl.swiper.on('slideChange', _onSlideChange);
   }
 
-  /* PhotoBrowser closed: Framework7 fires popup:close on the element */
+  /* PhotoBrowser close                                                       */
   pbEl.addEventListener('popup:close', _onBrowserClose);
 
-  /* MutationObserver fallback — catches close even if the event name varies */
+  /* MutationObserver fallback in case popup:close doesn't fire              */
   var observer = new MutationObserver(function(mutations) {
     mutations.forEach(function(m) {
       m.removedNodes.forEach(function(n) {
@@ -86,24 +87,32 @@ function _hookPhotoBrowserEvents() {
   observer.observe(document.body, { childList: true, subtree: true });
 }
 
-/* Called when the user swipes to a new slide.                               */
+/* FIX 1 — guard against Swiper slideChange firing on tap snap-back.
+   Swiper fires slideChange even when the user taps (finger down → up)
+   without moving. The slide index stays the same — that's our signal.       */
 function _onSlideChange() {
-  selectedTiles = {};
-  /* Small delay so Framework7 finishes updating .swiper-slide-active       */
-  setTimeout(function() {
-    if (gridAttach()) gridDraw();
-    _notifyTiles();
+  var swiper = _getSwiper();
+  var newIdx = swiper ? swiper.activeIndex : _lastSlideIndex;
 
-    var swiper = _getSwiper();
-    if (swiper)
-      Shiny.setInputValue('photo_index_changed', swiper.activeIndex, { priority: 'event' });
+  if (newIdx === _lastSlideIndex) return;   /* same index = snap-back, ignore */
+
+  _lastSlideIndex = newIdx;
+  selectedTiles   = {};
+
+  setTimeout(function() {
+    if (gridAttach()) {
+      gridDraw();
+      _attachCanvasTouchListeners();   /* re-attach on new slide's canvas     */
+    }
+    _notifyTiles();
+    Shiny.setInputValue('photo_index_changed', newIdx, { priority: 'event' });
   }, 80);
 }
 
-/* Called when the PhotoBrowser is dismissed.                                */
 function _onBrowserClose() {
-  if (!_browserIsOpen) return;   /* guard against double-firing */
-  _browserIsOpen = false;
+  if (!_browserIsOpen) return;
+  _browserIsOpen  = false;
+  _lastSlideIndex = -1;
   gridRemove();
   Shiny.setInputValue('browser_closed', Date.now(), { priority: 'event' });
 }
@@ -115,49 +124,52 @@ function _getSwiper() {
 
 /* ─────────────────────────────────────────────────────────────────────────────
    TAP → TILE TOGGLE
-───────────────────────────────────────────────────────────────────────────── */
 
-/* Desktop click on the canvas */
-document.addEventListener('click', function(e) {
-  if (!_browserIsOpen || !e.target || e.target.id !== 'grid-canvas') return;
-  var rect = e.target.getBoundingClientRect();
-  _toggleTile(e.clientX - rect.left, e.clientY - rect.top);
-});
-
-/* Mobile touch — record start */
-document.addEventListener('touchstart', function(e) {
-  if (!_browserIsOpen) return;
-  _tapStartX = e.touches[0].clientX;
-  _tapStartY = e.touches[0].clientY;
-}, { passive: true });
-
-/* Mobile touch — on end, dispatch as tap if travel is small */
-document.addEventListener('touchend', function(e) {
-  if (!_browserIsOpen || _tapStartX === null) return;
-
-  var touch = e.changedTouches[0];
-  var dx    = touch.clientX - _tapStartX;
-  var dy    = touch.clientY - _tapStartY;
-  _tapStartX = _tapStartY = null;
-
-  if (Math.sqrt(dx*dx + dy*dy) > TAP_MAX_TRAVEL) return;  /* was a swipe */
-
-  /* Check the touch landed on the canvas */
+   FIX 2 — attach listeners directly on the canvas with capture:true.
+   Listening on document means Swiper's handlers (also on document) may run
+   first and stop propagation. Attaching on the canvas element with capture
+   puts us first in the event chain, before Swiper sees the touch.
+   We re-attach after each slide change (new canvas element each time).      */
+function _attachCanvasTouchListeners() {
   var canvas = document.getElementById('grid-canvas');
-  if (!canvas) return;
-  var rect = canvas.getBoundingClientRect();
-  var px   = touch.clientX - rect.left;
-  var py   = touch.clientY - rect.top;
-  if (px < 0 || py < 0 || px > rect.width || py > rect.height) return;
+  if (!canvas || canvas._tapListenersAttached) return;
 
-  _toggleTile(px, py);
-}, { passive: true });
+  canvas.addEventListener('touchstart', function(e) {
+    _tapStartX = e.touches[0].clientX;
+    _tapStartY = e.touches[0].clientY;
+  }, { passive: true, capture: true });
+
+  canvas.addEventListener('touchend', function(e) {
+    if (_tapStartX === null) return;
+
+    var touch = e.changedTouches[0];
+    var dx    = touch.clientX - _tapStartX;
+    var dy    = touch.clientY - _tapStartY;
+    _tapStartX = _tapStartY = null;
+
+    if (Math.sqrt(dx*dx + dy*dy) > TAP_MAX_TRAVEL) return;  /* real swipe */
+
+    /* Coordinates relative to canvas top-left (matches canvas pixel buffer) */
+    var rect = canvas.getBoundingClientRect();
+    var px   = touch.clientX - rect.left;
+    var py   = touch.clientY - rect.top;
+
+    _toggleTile(px, py);
+  }, { passive: true, capture: true });
+
+  /* Desktop fallback                                                         */
+  canvas.addEventListener('click', function(e) {
+    var rect = canvas.getBoundingClientRect();
+    _toggleTile(e.clientX - rect.left, e.clientY - rect.top);
+  });
+
+  canvas._tapListenersAttached = true;   /* prevent duplicate attachment     */
+}
 
 /* ─────────────────────────────────────────────────────────────────────────────
    INTERNAL HELPERS
 ───────────────────────────────────────────────────────────────────────────── */
 
-/* Toggle the tile at canvas-pixel (px, py) and notify Shiny.               */
 function _toggleTile(px, py) {
   var hit = gridHitTile(px, py);
   if (!hit) return;
@@ -170,7 +182,6 @@ function _toggleTile(px, py) {
   _notifyTiles();
 }
 
-/* Push current selectedTiles to R (converts to 1-based row/col).           */
 function _notifyTiles() {
   Shiny.setInputValue(
     'selected_tiles',

@@ -4,7 +4,8 @@ library(tools)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  IMAGE LOADER
-#  Copies all images from images/ into www/current/ at startup.
+#  Copies all images from images/ into www/current/ at startup so Shiny
+#  serves them as static assets accessible by f7PhotoBrowser.
 # ══════════════════════════════════════════════════════════════════════════════
 
 prepare_images <- function(img_dir = "images") {
@@ -23,41 +24,40 @@ prepare_images <- function(img_dir = "images") {
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  UI
-#  No canvas in the page — JS injects it inside the PhotoBrowser slide.
-#  No CSS overrides needed either.
+#  Only events.js is loaded — it imports grid.js internally via its own
+#  responsibilities. No canvas in the page markup.
 # ══════════════════════════════════════════════════════════════════════════════
 
 ui <- f7Page(
   title   = "Tile Selector",
-  options = list(theme = "auto", dark = FALSE, color = "#6dcea0"),
+  options = list(theme = "auto", dark = "auto", color = "#6dcea0"),
 
   tags$head(
-    tags$script(src = "grid.js"),
-    tags$script(src = "events.js")
+    tags$script(src = "grid.js"),     # grid first — defines functions events.js calls
+    tags$script(src = "events.js")    # events second — wires everything together
   ),
 
   f7SingleLayout(
     navbar = f7Navbar(title = "Tile Selector"),
-
     f7Block(
-      f7Button(
-        inputId = "open_browser",
-        label   = "Open images",
-        color   = "teal"
-      )
+      f7Button(inputId = "open_browser", label = "Open images", color = "teal")
     )
   )
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SERVER
+#  R responsibilities:
+#    1. Prepare images and open the PhotoBrowser
+#    2. Listen to JS events: slide change, browser closed, tile selection
+#    3. Persist tile selections (hook ready for MongoDB / Google Sheets)
 # ══════════════════════════════════════════════════════════════════════════════
 
 server <- function(input, output, session) {
 
-  all_urls      <- prepare_images()
-  sel_tiles     <- reactiveVal(list())
-  current_idx   <- reactiveVal(1L)
+  all_urls    <- prepare_images()
+  sel_tiles   <- reactiveVal(list())
+  current_idx <- reactiveVal(1L)
 
   if (is.null(all_urls))
     f7Toast(session, text = "No images found in images/ folder.", position = "bottom")
@@ -68,31 +68,30 @@ server <- function(input, output, session) {
     lapply(urls, function(u) list(url = u))
   }
 
-  # ── Open PhotoBrowser, then tell JS it's open ──────────────────────────────
+  # ── 1. Open PhotoBrowser then signal JS to attach the grid canvas ──────────
   observeEvent(input$open_browser, {
     req(all_urls)
     f7PhotoBrowser(
       id     = "photo_browser",
-      theme  = "light",
+      theme  = "dark",
       type   = "standalone",
       photos = make_photos(all_urls)
     )
-    # Notify JS — it will poll for the active slide img and inject the canvas
     session$sendCustomMessage("browser_opened", list())
   })
 
-  # ── Slide change reported by JS ────────────────────────────────────────────
+  # ── 2a. Slide changed — JS reports new 0-based index ──────────────────────
   observeEvent(input$photo_index_changed, {
     current_idx(as.integer(input$photo_index_changed) + 1L)
     sel_tiles(list())
   })
 
-  # ── PhotoBrowser closed ────────────────────────────────────────────────────
+  # ── 2b. PhotoBrowser closed ────────────────────────────────────────────────
   observeEvent(input$browser_closed, {
     sel_tiles(list())
   })
 
-  # ── Tile selection from JS ──────────────────────────────────────────────────
+  # ── 2c. Tile selection updated by JS (1-based row/col) ────────────────────
   observeEvent(input$selected_tiles, {
     tiles <- input$selected_tiles
     if (is.null(tiles)) return()
@@ -105,7 +104,8 @@ server <- function(input, output, session) {
     }
     sel_tiles(result)
 
-    # ── Persistence hook ──────────────────────────────────────────────────────
+    # ── 3. Persistence hook ────────────────────────────────────────────────────
+    # Uncomment and configure when ready:
     # df <- data.frame(
     #   timestamp  = Sys.time(),
     #   image_name = basename(all_urls[current_idx()]),

@@ -34,6 +34,7 @@ ui <- f7Page(
         width: 100%;
         height: 100%;
         overflow: hidden;
+        background: #000;
         display: flex;
         align-items: center;
         justify-content: center;
@@ -63,30 +64,25 @@ ui <- f7Page(
   
   f7SingleLayout(
     navbar = f7Navbar(
-      title = "Tile Selector",
-      left  = f7Button(
-        inputId = "nav_prev",
-        label   = NULL,
-        icon    = f7Icon("arrow_left"),
-        fill    = FALSE,
-        color   = "white"
-      ),
-      right = f7Button(
-        inputId = "nav_next",
-        label   = NULL,
-        icon    = f7Icon("arrow_right"),
-        fill    = FALSE,
-        color   = "white"
-      )
+      title = "DuoWeeDo"
     ),
     
-    f7Block(  
-      tags$div(
-        id = "img-wrap",
-        tags$img(id = "bg-image", src = "", alt = ""),
-        tags$canvas(id = "grid-canvas")
-      )
-    )
+   
+    
+    
+    # Static DOM — always in the page, no lifecycle management needed
+    tags$div(
+      id = "img-wrap",
+      tags$img(id = "bg-image", src = "", alt = ""),
+      tags$canvas(id = "grid-canvas")
+    ),
+    
+    toolbar=f7Toolbar(
+      position = "bottom",
+      f7Button(icon = f7Icon("arrow_left"), inputId = "nav_prev"),
+      tags$div(style = "flex:1"),
+      f7Button(icon = f7Icon("arrow_right"), inputId = "nav_next")
+    ),
   )
 )
 

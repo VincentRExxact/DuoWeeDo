@@ -2,57 +2,46 @@
    grid.js  —  Grid display layer
 
    PUBLIC API (called by events.js):
-     gridAttach()        → find active slide img, inject canvas, size it
-                           returns true if successful
-     gridDraw()          → redraw grid + selected tiles on canvas
-     gridRemove()        → detach canvas from DOM (PhotoBrowser closed)
-     gridHitTile(px, py) → return {row, col} (0-based) or null
-     gridClear()         → clear selectedTiles + redraw
+     gridInit()           → size canvas to img, enable pointer events, draw
+     gridDraw()           → redraw grid + selected tiles
+     gridHitTile(px, py)  → {row,col} 0-based in canvas-pixel space, or null
+     gridClear()          → clear selectedTiles + redraw
+     gridApplyTransform(scale, dx, dy) → keep canvas aligned during zoom/pan
 
-   STATE (read by events.js to notify Shiny):
-     selectedTiles       → object { "r,c": true, ... }  0-based keys
+   SHARED STATE (read/written by events.js):
+     selectedTiles        → { "r,c": true }  0-based
 
-   NO event listeners here. NO Shiny calls here.
+   NO event listeners. NO Shiny calls.
 ───────────────────────────────────────────────────────────────────────────── */
 
 /* ── Constants ───────────────────────────────────────────────────────────── */
-var G          = 8;       /* grid size */
-var TOP_MARGIN = 0.22;    /* top edge inset fraction on each side */
-var ROW_RATIO  = 0.9;     /* height ratio between consecutive rows (bottom→top) */
+var G          = 8;
+var TOP_MARGIN = 0.22;
+var ROW_RATIO  = 0.9;
 
 /* ── Shared state ────────────────────────────────────────────────────────── */
-var selectedTiles = {};   /* "r,c" (0-based) → true */
-
-/* ── Private: canvas element ─────────────────────────────────────────────── */
-var _canvas = null;
+var selectedTiles = {};
 
 /* ─────────────────────────────────────────────────────────────────────────────
    GEOMETRY
 ───────────────────────────────────────────────────────────────────────────── */
 
-function _computeVBoundaries() {
-  /* Geometric series: row heights decrease by ROW_RATIO from bottom to top.
-     vs[r] = v-coordinate at the bottom edge of row r  (v ∈ [0,1])
-     vs[r+1]                at the top    edge of row r                       */
+function _vBounds() {
   var h0 = (1 - ROW_RATIO) / (1 - Math.pow(ROW_RATIO, G));
   var vs = [0];
-  for (var r = 0; r < G; r++)
-    vs.push(vs[r] + h0 * Math.pow(ROW_RATIO, r));
+  for (var r = 0; r < G; r++) vs.push(vs[r] + h0 * Math.pow(ROW_RATIO, r));
   return vs;
 }
 
 function _bilerp(W, H, u, v) {
-  /* Bilinear interpolation inside the trapezoid.
-     Corners (pixels):  bl=(0,H)  br=(W,H)  tl=(W*m,0)  tr=(W*(1-m),0)    */
   var m = TOP_MARGIN;
   return {
-    x: (1-u)*(1-v)*0 + u*(1-v)*W + (1-u)*v*(W*m) + u*v*(W*(1-m)),
-    y: (1-u)*(1-v)*H + u*(1-v)*H + (1-u)*v*0      + u*v*0
+    x: (1-u)*(1-v)*0 + u*(1-v)*W + (1-u)*v*(W*m)     + u*v*(W*(1-m)),
+    y: (1-u)*(1-v)*H + u*(1-v)*H + (1-u)*v*0          + u*v*0
   };
 }
 
-function _tileCorners(row, col, W, H, vs) {
-  /* Four pixel-space corners of cell (row, col), 0-based. */
+function _corners(row, col, W, H, vs) {
   return {
     bl: _bilerp(W, H, col/G,       vs[row]),
     br: _bilerp(W, H, (col+1)/G,   vs[row]),
@@ -62,88 +51,73 @@ function _tileCorners(row, col, W, H, vs) {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   DOM — find img, create canvas, size and position it
-───────────────────────────────────────────────────────────────────────────── */
-
-function _getActiveSlideImg() {
-  /* Framework7 marks the visible slide with .swiper-slide-active */
-  return document.querySelector(
-    '.photo-browser .swiper-slide-active img,' +
-    '.photo-browser-swiper .swiper-slide-active img'
-  ) || null;
-}
-
-function _getOrCreateCanvas() {
-  if (!_canvas) {
-    _canvas = document.createElement('canvas');
-    _canvas.id = 'grid-canvas';
-    /* NO CSS width/height — canvas.width/height alone define the pixel buffer.
-       position:absolute + explicit top/left align it exactly over the img.   */
-    _canvas.style.cssText = [
-      'position:absolute',
-      'top:0', 'left:0',
-      'z-index:9999',
-      'touch-action:none',
-      'pointer-events:auto'
-    ].join(';');
-  }
-  return _canvas;
-}
-
-/* ─────────────────────────────────────────────────────────────────────────────
    PUBLIC API
 ───────────────────────────────────────────────────────────────────────────── */
 
-/* gridAttach()
-   Finds the active slide <img>, injects the canvas as a sibling,
-   and sizes the canvas pixel buffer to the img's rendered dimensions.
-   Returns true on success, false if the img is not yet rendered.            */
-function gridAttach() {
-  var img = _getActiveSlideImg();
-  if (!img) return false;
+/* gridInit()
+   Called once after a new image loads.
+   Sizes the canvas pixel buffer to exactly match the rendered <img>.
+   Returns true on success (img must be painted).                            */
+function gridInit() {
+  var img    = document.getElementById('bg-image');
+  var canvas = document.getElementById('grid-canvas');
+  if (!img || !canvas) return false;
 
   var rect = img.getBoundingClientRect();
-  if (rect.width <= 0 || rect.height <= 0) return false;   /* not yet painted */
+  if (rect.width <= 0 || rect.height <= 0) return false;
 
-  var canvas = _getOrCreateCanvas();
-  var parent = img.parentElement;
+  /* Size the pixel buffer — NO CSS width/height, buffer IS the size.       */
+  canvas.width  = Math.round(rect.width);
+  canvas.height = Math.round(rect.height);
 
-  /* Parent must be position:relative so our absolute canvas aligns on it.   */
-  if (parent && getComputedStyle(parent).position === 'static')
-    parent.style.position = 'relative';
+  /* Position canvas exactly over the img (img may be centred via flexbox). */
+  var wrapRect = img.parentElement.getBoundingClientRect();
+  canvas.style.left = Math.round(rect.left - wrapRect.left) + 'px';
+  canvas.style.top  = Math.round(rect.top  - wrapRect.top)  + 'px';
 
-  /* Move canvas into the img's parent if needed */
-  if (canvas.parentElement !== parent) {
-    if (canvas.parentElement) canvas.parentElement.removeChild(canvas);
-    if (parent) parent.appendChild(canvas);
-  }
+  /* Enable touch events now that we're sized correctly.                    */
+  canvas.style.pointerEvents = 'auto';
 
-  /* Size the pixel buffer to match the rendered img exactly.
-     Also set explicit top/left in case img is offset within its parent
-     (e.g. object-fit:contain with letterboxing).                            */
-  var parentRect = parent.getBoundingClientRect();
-  canvas.width        = Math.round(rect.width);
-  canvas.height       = Math.round(rect.height);
-  canvas.style.left   = Math.round(rect.left - parentRect.left) + 'px';
-  canvas.style.top    = Math.round(rect.top  - parentRect.top)  + 'px';
-
+  gridDraw();
   return true;
 }
 
-/* gridDraw()
-   Redraws the full grid and highlights on the canvas.                       */
+/* gridApplyTransform(scale, originX, originY, dx, dy)
+   Called by events.js during pinch-zoom / pan.
+   Mirrors the CSS transform applied to <img> so the canvas tracks perfectly.
+   scale    → current zoom scale factor
+   originX/Y → transform-origin in img-wrap coordinates (pinch midpoint)
+   dx, dy   → cumulative pan offset                                          */
+function gridApplyTransform(scale, originX, originY, dx, dy) {
+  var canvas = document.getElementById('grid-canvas');
+  if (!canvas) return;
+  /* Apply the same transform to canvas as applied to the img.              */
+  canvas.style.transformOrigin = originX + 'px ' + originY + 'px';
+  canvas.style.transform = 'translate(' + dx + 'px,' + dy + 'px) scale(' + scale + ')';
+}
+
+/* gridResetTransform()  — called when zoom resets.                         */
+function gridResetTransform() {
+  var canvas = document.getElementById('grid-canvas');
+  if (!canvas) return;
+  canvas.style.transform       = '';
+  canvas.style.transformOrigin = '';
+}
+
+/* gridDraw()  — redraw grid + highlights.                                  */
 function gridDraw() {
-  if (!_canvas) return;
-  var W = _canvas.width, H = _canvas.height;
+  var canvas = document.getElementById('grid-canvas');
+  if (!canvas) return;
+  var W = canvas.width, H = canvas.height;
   if (!W || !H) return;
 
-  var ctx = _canvas.getContext('2d');
-  var vs  = _computeVBoundaries();
+  var ctx = canvas.getContext('2d');
+  var vs  = _vBounds();
   ctx.clearRect(0, 0, W, H);
 
-  /* Selected tile fills */
-  Object.keys(selectedTiles).forEach(function(key) {
-    var rc = key.split(','), p = _tileCorners(+rc[0], +rc[1], W, H, vs);
+  /* Selected fills */
+  Object.keys(selectedTiles).forEach(function(k) {
+    var rc = k.split(','), p = _corners(+rc[0], +rc[1], W, H, vs);
     ctx.beginPath();
     ctx.moveTo(p.bl.x,p.bl.y); ctx.lineTo(p.br.x,p.br.y);
     ctx.lineTo(p.tr.x,p.tr.y); ctx.lineTo(p.tl.x,p.tl.y);
@@ -152,7 +126,7 @@ function gridDraw() {
     ctx.fill();
   });
 
-  /* Horizontal grid lines */
+  /* Horizontal lines */
   ctx.strokeStyle = 'rgba(80,200,130,0.9)';
   ctx.lineWidth   = 1.5;
   for (var ri = 0; ri <= G; ri++) {
@@ -164,7 +138,7 @@ function gridDraw() {
     ctx.stroke();
   }
 
-  /* Vertical grid lines */
+  /* Vertical lines */
   for (var ci2 = 0; ci2 <= G; ci2++) {
     ctx.beginPath();
     for (var ri2 = 0; ri2 <= G; ri2++) {
@@ -174,11 +148,11 @@ function gridDraw() {
     ctx.stroke();
   }
 
-  /* Selected tile borders (drawn on top of grid lines) */
+  /* Selected borders */
   ctx.strokeStyle = '#6dcea0';
   ctx.lineWidth   = 2.5;
-  Object.keys(selectedTiles).forEach(function(key2) {
-    var rc2 = key2.split(','), p2 = _tileCorners(+rc2[0], +rc2[1], W, H, vs);
+  Object.keys(selectedTiles).forEach(function(k2) {
+    var rc2 = k2.split(','), p2 = _corners(+rc2[0], +rc2[1], W, H, vs);
     ctx.beginPath();
     ctx.moveTo(p2.bl.x,p2.bl.y); ctx.lineTo(p2.br.x,p2.br.y);
     ctx.lineTo(p2.tr.x,p2.tr.y); ctx.lineTo(p2.tl.x,p2.tl.y);
@@ -187,42 +161,33 @@ function gridDraw() {
   });
 }
 
-/* gridRemove()
-   Detaches the canvas from the DOM. Called when PhotoBrowser closes.        */
-function gridRemove() {
-  if (_canvas && _canvas.parentElement)
-    _canvas.parentElement.removeChild(_canvas);
-}
-
-/* gridClear()
-   Resets tile selection and redraws.                                        */
+/* gridClear()  — reset selection + redraw.                                 */
 function gridClear() {
   selectedTiles = {};
   gridDraw();
 }
 
 /* gridHitTile(px, py)
-   Returns {row, col} (0-based) for the tile at canvas-pixel (px, py),
-   or null if outside the trapezoid.
-   px, py must be relative to the canvas top-left corner.                    */
+   px, py in canvas-pixel space (relative to canvas top-left, pre-transform).
+   Returns {row, col} 0-based or null.                                       */
 function gridHitTile(px, py) {
-  if (!_canvas) return null;
-  var W = _canvas.width, H = _canvas.height;
-  var vs = _computeVBoundaries();
+  var canvas = document.getElementById('grid-canvas');
+  if (!canvas) return null;
+  var W = canvas.width, H = canvas.height;
+  var vs = _vBounds();
 
   function cross(ax,ay,bx,by) { return ax*by - ay*bx; }
   function inQuad(px,py,p) {
-    var pts = [p.bl, p.tl, p.tr, p.br];
-    for (var i = 0; i < 4; i++) {
-      var a = pts[i], b = pts[(i+1)%4];
-      if (cross(b.x-a.x, b.y-a.y, px-a.x, py-a.y) < 0) return false;
+    var pts = [p.bl,p.tl,p.tr,p.br];
+    for (var i=0;i<4;i++){
+      var a=pts[i],b=pts[(i+1)%4];
+      if(cross(b.x-a.x,b.y-a.y,px-a.x,py-a.y)<0) return false;
     }
     return true;
   }
-
-  for (var r = 0; r < G; r++)
-    for (var c = 0; c < G; c++)
-      if (inQuad(px, py, _tileCorners(r, c, W, H, vs)))
-        return { row: r, col: c };
+  for (var r=0;r<G;r++)
+    for (var c=0;c<G;c++)
+      if(inQuad(px,py,_corners(r,c,W,H,vs)))
+        return {row:r, col:c};
   return null;
 }
